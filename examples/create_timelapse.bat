@@ -110,8 +110,9 @@ echo [INFO] FPS: %FPS%
 echo [INFO] Quality: CRF %DEFAULT_QUALITY% ^(lower = better^)
 echo.
 
-REM Calculate estimated duration
-set /a DURATION=%IMAGE_COUNT% / %FPS%
+REM Calculate estimated duration (with decimal precision)
+REM Using PowerShell for floating point calculation
+for /f %%i in ('powershell -command "[math]::Round(%IMAGE_COUNT% / %FPS%, 1)"') do set DURATION=%%i
 echo [INFO] Estimated video duration: %DURATION% seconds
 echo.
 

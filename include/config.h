@@ -229,38 +229,60 @@
 
 // Apply preset configurations
 #ifdef PRESET_FAST_TEST
-    #undef CAPTURE_INTERVAL_MS
-    #undef FRAME_SIZE
-    #undef IMAGE_QUALITY
+    #ifdef CAPTURE_INTERVAL_MS
+        #undef CAPTURE_INTERVAL_MS
+    #endif
+    #ifdef FRAME_SIZE
+        #undef FRAME_SIZE
+    #endif
+    #ifdef IMAGE_QUALITY
+        #undef IMAGE_QUALITY
+    #endif
     #define CAPTURE_INTERVAL_MS 5000
     #define FRAME_SIZE FRAMESIZE_SVGA
     #define IMAGE_QUALITY 12
 #endif
 
 #ifdef PRESET_PLANT_GROWTH
-    #undef CAPTURE_INTERVAL_MS
-    #undef IMAGE_QUALITY
+    #ifdef CAPTURE_INTERVAL_MS
+        #undef CAPTURE_INTERVAL_MS
+    #endif
+    #ifdef IMAGE_QUALITY
+        #undef IMAGE_QUALITY
+    #endif
     #define CAPTURE_INTERVAL_MS 300000  // 5 minutes
     #define IMAGE_QUALITY 10
 #endif
 
 #ifdef PRESET_CONSTRUCTION
-    #undef CAPTURE_INTERVAL_MS
-    #undef IMAGE_QUALITY
+    #ifdef CAPTURE_INTERVAL_MS
+        #undef CAPTURE_INTERVAL_MS
+    #endif
+    #ifdef IMAGE_QUALITY
+        #undef IMAGE_QUALITY
+    #endif
     #define CAPTURE_INTERVAL_MS 1800000  // 30 minutes
     #define IMAGE_QUALITY 10
 #endif
 
 #ifdef PRESET_CLOUD_MOTION
-    #undef CAPTURE_INTERVAL_MS
-    #undef IMAGE_QUALITY
+    #ifdef CAPTURE_INTERVAL_MS
+        #undef CAPTURE_INTERVAL_MS
+    #endif
+    #ifdef IMAGE_QUALITY
+        #undef IMAGE_QUALITY
+    #endif
     #define CAPTURE_INTERVAL_MS 10000  // 10 seconds
     #define IMAGE_QUALITY 10
 #endif
 
 #ifdef PRESET_SUNSET
-    #undef CAPTURE_INTERVAL_MS
-    #undef IMAGE_QUALITY
+    #ifdef CAPTURE_INTERVAL_MS
+        #undef CAPTURE_INTERVAL_MS
+    #endif
+    #ifdef IMAGE_QUALITY
+        #undef IMAGE_QUALITY
+    #endif
     #define CAPTURE_INTERVAL_MS 15000  // 15 seconds
     #define IMAGE_QUALITY 8  // Higher quality
 #endif

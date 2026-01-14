@@ -331,8 +331,8 @@ void captureAndSaveImage() {
 
 String getNextFilename() {
   // Format: /timelapse/IMG_XXXXX.jpg (e.g., IMG_00001.jpg)
-  char filename[30];
-  sprintf(filename, "/timelapse/IMG_%05d.jpg", imageCount);
+  char filename[40];
+  snprintf(filename, sizeof(filename), "/timelapse/IMG_%05d.jpg", imageCount);
   return String(filename);
 }
 

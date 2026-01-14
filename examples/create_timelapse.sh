@@ -91,7 +91,8 @@ count_images() {
 estimate_duration() {
     local image_count=$1
     local fps=$2
-    local duration=$(echo "scale=2; $image_count / $fps" | bc)
+    # Use shell arithmetic instead of bc for better compatibility
+    local duration=$(( image_count / fps ))
     echo "$duration"
 }
 
