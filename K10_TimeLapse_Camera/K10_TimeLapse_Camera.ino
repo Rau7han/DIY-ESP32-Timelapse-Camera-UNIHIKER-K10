@@ -96,11 +96,11 @@ struct ResInfo {
 };
 
 const ResInfo RES[] = {
-    {"QVGA",    "240x320 - Fast",     FRAMESIZE_QVGA},
-    {"VGA",     "640x480 - Good",     FRAMESIZE_SVGA},
-    {"SVGA",    "800x600 - Better",   FRAMESIZE_XGA},
-    {"HD",      "1280x720 - HD",      FRAMESIZE_SXGA},
-    {"SXGA",    "1280x1024 - Best",   FRAMESIZE_UXGA}
+    {"QVGA",    "320x240 - Fast",     FRAMESIZE_QVGA},
+    {"VGA",     "640x480 - Good",     FRAMESIZE_VGA},
+    {"SVGA",    "800x600 - Better",   FRAMESIZE_SVGA},
+    {"HD",      "1280x720 - HD",      FRAMESIZE_HD},
+    {"SXGA",    "1280x1024 - Best",   FRAMESIZE_SXGA}
 };
 #define NUM_RES 5
 
@@ -636,7 +636,7 @@ uint32_t sdScan() {
         if (!f) break;
         const char* n = f.name();
         int len = strlen(n);
-        if (len >= 12 && n[0] == 'i' && n[1] == 'm' && n[2] == 'g') {
+        if (len == 12 && n[0] == 'i' && n[1] == 'm' && n[2] == 'g') {
             if (n[len-4] == '.' && n[len-3] == 'j' && n[len-2] == 'p' && n[len-1] == 'g') {
                 char num[6] = {0};
                 for (int i = 0; i < 5; i++) num[i] = n[3 + i];
@@ -662,8 +662,9 @@ bool sdSave(uint8_t* buf, size_t len, uint32_t num) {
     
     if (w != len) { strcpy(msgErr, "Write failed"); return false; }
     
-    for (int i = 0; i < 18; i++) msgFile[i] = path[i + 1];
-    msgFile[18] = 0;
+    // Copy filename without leading slash (path+1), ensuring no overflow
+    strncpy(msgFile, path + 1, sizeof(msgFile) - 1);
+    msgFile[sizeof(msgFile) - 1] = 0;
     totalKB += len / 1024;
     return true;
 }
