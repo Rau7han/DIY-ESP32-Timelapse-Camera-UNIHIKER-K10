@@ -6,6 +6,8 @@
 
 A DIY mini timelapse camera built with ESP32-CAM and UNIHIKER K10. Captures images at configurable intervals and saves them to an SD card. Perfect for creating timelapse videos of plants growing, construction projects, sunsets, or any long-duration events.
 
+> **🚀 New to this project? Start with the [Quick Start Guide](QUICKSTART.md) to get up and running in 15 minutes!**
+
 ## 🌟 Features
 
 - **Automatic Timelapse Capture**: Configurable intervals from seconds to hours
