@@ -14,6 +14,7 @@ REM
 REM Prerequisites:
 REM   - FFmpeg must be installed and in PATH
 REM   - Images should be in sequence (IMG_00001.jpg, IMG_00002.jpg, etc.)
+REM   - PowerShell required for duration calculation (optional feature)
 REM ============================================================================
 
 setlocal enabledelayedexpansion
