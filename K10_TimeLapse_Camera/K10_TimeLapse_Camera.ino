@@ -1,19 +1,7 @@
 /******************************************************
  * UNIHIKER K10 Time-Lapse Camera
  * --------------------------------
- * Modern time-lapse camera with beautiful UI
- * 
- * Features:
- * - Stream camera to display
- * - Capture time-lapse images to SD card
- * - Selectable resolution
- * - A+B to exit from any screen
- * 
- * Hardware:   UNIHIKER K10 (ESP32-S3)
- * 
- * By Rau7han - 2026
- * Original by DJS - 11/1/2025
- *******************************************************/
+*/
 
 #include "unihiker_k10.h"
 
