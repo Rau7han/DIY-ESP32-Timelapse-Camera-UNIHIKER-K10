@@ -1,1 +1,864 @@
 
+/******************************************************
+ * UNIHIKER K10 Time-Lapse Camera
+ * --------------------------------
+ * Features:
+ * - Stream camera to display
+ * - Capture time-lapse images to SD card
+ * - Selectable resolution
+  * 
+ * Hardware:   UNIHIKER K10 (ESP32-S3)
+ * By Rau7han 
+  *******************************************************/
+
+
+#include "unihiker_k10.h"
+
+// ============================================================
+// CAMERA PINS (K10 - DO NOT CHANGE)
+// ============================================================
+#define CAM_PWDN     -1
+#define CAM_RESET    -1
+#define CAM_XCLK      7
+#define CAM_SIOD     47
+#define CAM_SIOC     48
+#define CAM_Y9        6
+#define CAM_Y8       15
+#define CAM_Y7       16
+#define CAM_Y6       18
+#define CAM_Y5        9
+#define CAM_Y4       11
+#define CAM_Y3       10
+#define CAM_Y2        8
+#define CAM_VSYNC     4
+#define CAM_HREF      5
+#define CAM_PCLK     17
+
+// ============================================================
+// CONFIG
+// ============================================================
+#define APP_VERSION     "v3.0"
+#define APP_AUTHOR      "Rau7han"
+#define JPG_QUALITY     50
+#define EXIT_HOLD_MS    800
+#define UI_REFRESH_MS   800
+
+// ============================================================
+// COLORS
+// ============================================================
+#define C_BG          0x0000
+#define C_CARD        0x10A2
+#define C_CARD_LIGHT  0x2124
+#define C_BORDER      0x4228
+#define C_ACCENT      0x07FF
+#define C_CYAN        0x07FF
+#define C_WHITE       0xFFFF
+#define C_GRAY        0x8410
+#define C_DARK_GRAY   0x4208
+#define C_YELLOW      0xFFE0
+#define C_GREEN       0x07E0
+#define C_RED         0xF800
+#define C_MAGENTA     0xF81F
+
+// ============================================================
+// SCREEN
+// ============================================================
+#define SCR_W   240
+#define SCR_H   320
+
+// ============================================================
+// STATES
+// ============================================================
+enum State {
+    S_SPLASH,
+    S_MENU,
+    S_RES,
+    S_HRS,
+    S_MIN,
+    S_SEC,
+    S_CONFIRM,
+    S_STREAM,
+    S_REC,
+    S_DONE,
+    S_ERR
+};
+
+// ============================================================
+// RESOLUTIONS
+// ============================================================
+struct ResInfo {
+    const char* name;
+    const char* detail;
+    framesize_t size;
+};
+
+const ResInfo RES[] = {
+    {"QVGA",    "240x320 - Fast",     FRAMESIZE_QVGA},
+    {"VGA",     "640x480 - Good",     FRAMESIZE_SVGA},
+    {"SVGA",    "800x600 - Better",   FRAMESIZE_XGA},
+    {"HD",      "1280x720 - HD",      FRAMESIZE_SXGA},
+    {"SXGA",    "1280x1024 - Best",   FRAMESIZE_UXGA}
+};
+#define NUM_RES 5
+
+// ============================================================
+// GLOBALS
+// ============================================================
+UNIHIKER_K10 k10;
+TFT_eSPI tft = TFT_eSPI();
+
+// Buttons
+volatile bool flagA = false;
+volatile bool flagB = false;
+uint32_t bothStart = 0;
+
+// State
+State st = S_SPLASH;
+bool needDraw = true;
+uint32_t stTime = 0;
+uint32_t lastDraw = 0;
+
+// Settings
+int selMode = 0;
+int selRes = 1;
+int valH = 0, valM = 0, valS = 10;
+uint32_t interval = 10000;
+
+// Capture
+uint32_t capStart = 0;
+uint32_t nextCap = 0;
+uint32_t imgNum = 0;
+uint32_t imgBase = 0;
+uint32_t totalKB = 0;
+int errCnt = 0;
+
+// Camera
+bool camOn = false;
+uint8_t* jpgBuf = NULL;
+size_t jpgSize = 0;
+
+// SD
+bool sdOn = false;
+
+// Buffers
+char msgErr[40] = {0};
+char msgFile[20] = {0};
+
+// Stream
+bool streaming = false;
+
+// ============================================================
+// ISR
+// ============================================================
+void IRAM_ATTR onA() { flagA = true; }
+void IRAM_ATTR onB() { flagB = true; }
+
+// ============================================================
+// BUTTONS
+// ============================================================
+bool pressA() {
+    if (flagA) { flagA = false; return true; }
+    return false;
+}
+
+bool pressB() {
+    if (flagB) { flagB = false; return true; }
+    return false;
+}
+
+void clearBtn() {
+    flagA = false;
+    flagB = false;
+    bothStart = 0;
+}
+
+bool checkExit() {
+    if (flagA && flagB) {
+        if (bothStart == 0) bothStart = millis();
+        if (millis() - bothStart >= EXIT_HOLD_MS) {
+            flagA = false;
+            flagB = false;
+            bothStart = 0;
+            return true;
+        }
+    } else {
+        bothStart = 0;
+    }
+    return false;
+}
+
+// ============================================================
+// CLEANUP
+// ============================================================
+void stopCam() {
+    if (jpgBuf) { free(jpgBuf); jpgBuf = NULL; jpgSize = 0; }
+    if (camOn) { esp_camera_deinit(); camOn = false; }
+}
+
+void stopStream() {
+    streaming = false;
+    k10.initScreen(2);
+    tft.init();
+    tft.setRotation(2);
+    tft.setTextSize(1);
+    delay(50);
+}
+
+void cleanup() {
+    if (streaming) stopStream();
+    stopCam();
+    imgNum = 0;
+    totalKB = 0;
+    errCnt = 0;
+    msgFile[0] = 0;
+    msgErr[0] = 0;
+}
+
+void goHome() {
+    cleanup();
+    st = S_MENU;
+    needDraw = true;
+    stTime = millis();
+    clearBtn();
+}
+
+void goTo(State s) {
+    st = s;
+    needDraw = true;
+    stTime = millis();
+    clearBtn();
+}
+
+// ============================================================
+// DRAWING HELPERS
+// ============================================================
+void card(int x, int y, int w, int h, uint16_t fill, uint16_t edge, bool shadow = false) {
+    if (shadow) {
+        tft.fillRoundRect(x + 2, y + 2, w, h, 8, C_DARK_GRAY);
+    }
+    tft.fillRoundRect(x, y, w, h, 8, fill);
+    tft.drawRoundRect(x, y, w, h, 8, edge);
+}
+
+void topBar(const char* txt, uint16_t accent = C_CYAN) {
+    tft.fillRect(0, 0, SCR_W, 38, C_CARD);
+    tft.drawFastHLine(0, 37, SCR_W, accent);
+    tft.drawFastHLine(0, 38, SCR_W, accent);
+    
+    tft.setTextColor(C_DARK_GRAY, C_CARD);
+    tft.drawString(txt, 10, 11, 4);
+    tft.setTextColor(C_WHITE, C_CARD);
+    tft.drawString(txt, 8, 9, 4);
+}
+
+void botBar(const char* a, const char* b, bool showExit = false) {
+    int y = SCR_H - 38;
+    
+    tft.fillRect(0, y, SCR_W, 38, C_CARD);
+    tft.drawFastHLine(0, y, SCR_W, C_BORDER);
+    
+    if (a && a[0]) {
+        tft.fillRoundRect(8, y + 8, 22, 22, 4, C_YELLOW);
+        tft.setTextColor(C_BG, C_YELLOW);
+        tft.drawString("A", 14, y + 12, 2);
+        tft.setTextColor(C_GRAY, C_CARD);
+        tft.drawString(a, 35, y + 12, 2);
+    }
+    
+    if (b && b[0]) {
+        tft.fillRoundRect(125, y + 8, 22, 22, 4, C_GREEN);
+        tft.setTextColor(C_BG, C_GREEN);
+        tft.drawString("B", 131, y + 12, 2);
+        tft.setTextColor(C_GRAY, C_CARD);
+        tft.drawString(b, 152, y + 12, 2);
+    }
+    
+    if (showExit) {
+        tft.setTextColor(C_DARK_GRAY, C_CARD);
+        tft.drawString("A+B Exit", 175, y + 28, 1);
+    }
+}
+
+void menuOpt(int y, const char* txt, const char* sub, bool sel) {
+    uint16_t bg = sel ? C_CARD_LIGHT : C_BG;
+    uint16_t edge = sel ? C_CYAN : C_BORDER;
+    
+    card(8, y, SCR_W - 16, sub ? 42 : 32, bg, edge, sel);
+    
+    int dotX = 22;
+    int dotY = y + (sub ? 21 : 16);
+    if (sel) {
+        tft.fillCircle(dotX, dotY, 6, C_CYAN);
+        tft.fillCircle(dotX, dotY, 3, C_WHITE);
+    } else {
+        tft.drawCircle(dotX, dotY, 5, C_BORDER);
+    }
+    
+    tft. setTextColor(sel ? C_YELLOW : C_WHITE, bg);
+    tft.drawString(txt, 38, y + 8, 2);
+    
+    if (sub) {
+        tft.setTextColor(C_GRAY, bg);
+        tft.drawString(sub, 38, y + 26, 1);
+    }
+}
+
+void infoCard(int y, const char* lbl, const char* val, uint16_t col, bool highlight = false) {
+    uint16_t bg = highlight ? C_CARD_LIGHT : C_CARD;
+    card(8, y, SCR_W - 16, 38, bg, highlight ?  col : C_BORDER);
+    
+    tft.setTextColor(C_GRAY, bg);
+    tft.drawString(lbl, 16, y + 5, 1);
+    
+    tft.setTextColor(col, bg);
+    tft.drawString(val, 16, y + 19, 2);
+    
+    if (highlight) {
+        tft.fillRect(8, y, 3, 38, col);
+    }
+}
+
+void progressBar(int y, float pct, uint16_t col = C_CYAN) {
+    pct = constrain(pct, 0, 1);
+    int w = SCR_W - 32;
+    int filled = (int)(w * pct);
+    
+    tft.fillRoundRect(16, y, w, 10, 5, C_DARK_GRAY);
+    
+    if (filled > 0) {
+        tft.fillRoundRect(16, y, filled, 10, 5, col);
+        tft.drawFastHLine(16, y + 2, max(1, filled - 4), C_WHITE);
+    }
+}
+
+void valueBox(int y, const char* lbl, int val, const char* unit, int maxVal) {
+    card(8, y, SCR_W - 16, 80, C_CARD, C_CYAN, true);
+    
+    tft.setTextColor(C_GRAY, C_CARD);
+    tft.drawString(lbl, 16, y + 8, 2);
+    
+    char buf[16];
+    sprintf(buf, "%d", val);
+    tft.setTextColor(C_YELLOW, C_CARD);
+    tft.setTextDatum(MC_DATUM);
+    tft.drawString(buf, SCR_W / 2, y + 45, 6);
+    tft.setTextDatum(TL_DATUM);
+    
+    tft.setTextColor(C_GRAY, C_CARD);
+    tft.drawString(unit, SCR_W / 2 + 30, y + 40, 2);
+    
+    sprintf(buf, "0 - %d", maxVal);
+    tft.setTextColor(C_DARK_GRAY, C_CARD);
+    tft.drawString(buf, 16, y + 65, 1);
+}
+
+// ============================================================
+// BEAUTIFUL SPLASH SCREEN WITH "By Rau7han"
+// ============================================================
+void drawSplash() {
+    tft.fillScreen(C_BG);
+    
+    int cx = SCR_W / 2;
+    int iconY = 55;
+    
+    // Camera body with shadow
+    tft.fillRoundRect(cx - 42, iconY + 2, 84, 58, 10, C_DARK_GRAY);
+    tft.fillRoundRect(cx - 44, iconY, 88, 60, 12, C_CARD_LIGHT);
+    tft.drawRoundRect(cx - 44, iconY, 88, 60, 12, C_CYAN);
+    
+    // Lens rings
+    tft.fillCircle(cx, iconY + 30, 22, C_CYAN);
+    tft.fillCircle(cx, iconY + 30, 18, C_CARD);
+    tft.fillCircle(cx, iconY + 30, 14, C_CYAN);
+    tft.fillCircle(cx, iconY + 30, 10, C_CARD_LIGHT);
+    tft.fillCircle(cx, iconY + 30, 5, C_WHITE);
+    
+    // Flash
+    tft.fillRoundRect(cx - 32, iconY + 8, 18, 12, 3, C_YELLOW);
+    
+    // Shutter button
+    tft.fillCircle(cx + 30, iconY + 10, 6, C_RED);
+    
+    // App name with glow effect
+    tft.setTextColor(C_CYAN, C_BG);
+    tft.setTextDatum(MC_DATUM);
+    tft.drawString("Time-Lapse", cx + 1, 146, 4);
+    tft.setTextColor(C_WHITE, C_BG);
+    tft.drawString("Time-Lapse", cx, 145, 4);
+    
+    tft.setTextColor(C_CYAN, C_BG);
+    tft.drawString("Camera", cx + 1, 176, 4);
+    tft.setTextColor(C_WHITE, C_BG);
+    tft.drawString("Camera", cx, 175, 4);
+    
+    // Version badge
+    card(cx - 30, 200, 60, 24, C_CARD, C_CYAN);
+    tft.setTextColor(C_CYAN, C_CARD);
+    tft.drawString(APP_VERSION, cx, 212, 2);
+    
+    // ========== AUTHOR SECTION ==========
+    int authY = 245;
+    
+    // Decorative line with center dot
+    tft.drawFastHLine(40, authY - 10, SCR_W - 80, C_BORDER);
+    tft.fillCircle(cx, authY - 10, 3, C_CYAN);
+    
+    // "Created by" text
+    tft.setTextColor(C_GRAY, C_BG);
+    tft.drawString("Created by", cx, authY + 5, 2);
+    
+    // Author name - PROMINENT with shadow effect
+    tft.setTextColor(C_MAGENTA, C_BG);
+    tft.drawString(APP_AUTHOR, cx + 1, authY + 31, 4);
+    tft.setTextColor(C_YELLOW, C_BG);
+    tft.drawString(APP_AUTHOR, cx, authY + 30, 4);
+    
+    // Bottom decorative line
+    tft.drawFastHLine(40, authY + 55, SCR_W - 80, C_BORDER);
+    
+    // ========== LOADING ANIMATION ==========
+    tft.setTextColor(C_DARK_GRAY, C_BG);
+    tft.drawString("Loading", cx, SCR_H - 25, 1);
+    tft.setTextDatum(TL_DATUM);
+    
+    // Animated loading dots
+    for (int i = 0; i < 3; i++) {
+        delay(300);
+        int dotX = cx + 25 + (i * 8);
+        tft.fillCircle(dotX, SCR_H - 22, 3, C_CYAN);
+    }
+    
+    delay(400);
+}
+
+// ============================================================
+// SCREENS (Only 2 menu options:  Stream & Time-Lapse)
+// ============================================================
+void scrMenu() {
+    tft.fillScreen(C_BG);
+    topBar("Mode Select");
+    botBar("Change", "Select", false);
+    
+    // Only 2 options
+    menuOpt(60, "Live Stream", "Preview camera on screen", selMode == 0);
+    menuOpt(115, "Time-Lapse", "Capture to SD card", selMode == 1);
+    
+    // Info card
+    card(8, 175, SCR_W - 16, 80, C_CARD, C_BORDER);
+    tft.setTextColor(C_CYAN, C_CARD);
+    tft.drawString("Info", 16, 182, 2);
+    tft.setTextColor(C_GRAY, C_CARD);
+    
+    if (selMode == 0) {
+        tft.drawString("Live preview on screen", 16, 210, 1);
+        tft.drawString("No images saved", 16, 225, 1);
+        tft.drawString("Press A+B to exit stream", 16, 240, 1);
+    } else {
+        tft.drawString("Capture at intervals", 16, 210, 1);
+        tft.drawString("Save JPEG to SD card", 16, 225, 1);
+        tft.drawString("Press A+B to stop recording", 16, 240, 1);
+    }
+}
+
+void scrRes() {
+    tft.fillScreen(C_BG);
+    topBar("Resolution");
+    botBar("Change", "Select", true);
+    
+    for (int i = 0; i < NUM_RES; i++) {
+        menuOpt(45 + i * 45, RES[i].name, RES[i].detail, i == selRes);
+    }
+}
+
+void scrTime(const char* title, const char* lbl, int val, int mx) {
+    tft.fillScreen(C_BG);
+    topBar(title);
+    botBar("+1", "OK", true);
+    
+    valueBox(70, lbl, val, "", mx);
+    
+    card(8, 170, SCR_W - 16, 55, C_CARD, C_BORDER);
+    tft.setTextColor(C_GRAY, C_CARD);
+    tft.drawString("Interval Preview", 16, 178, 1);
+    
+    char buf[20];
+    sprintf(buf, "%02d:%02d:%02d", valH, valM, valS);
+    tft.setTextColor(C_CYAN, C_CARD);
+    tft.drawString(buf, 16, 195, 4);
+}
+
+void scrConfirm() {
+    tft.fillScreen(C_BG);
+    topBar("Confirm", C_GREEN);
+    botBar("Back", "Start!", true);
+    
+    char buf[32];
+    
+    infoCard(48, "Resolution", RES[selRes].name, C_CYAN, true);
+    
+    sprintf(buf, "%02d:%02d:%02d", valH, valM, valS);
+    infoCard(92, "Interval", buf, C_CYAN, true);
+    
+    infoCard(136, "SD Card", sdOn ? "Ready" : "NOT FOUND!", sdOn ? C_GREEN : C_RED, ! sdOn);
+    
+    sprintf(buf, "img%05lu.jpg", imgBase + 1);
+    infoCard(180, "First Image", buf, C_GRAY, false);
+    
+    if (! sdOn) {
+        card(8, 230, SCR_W - 16, 35, C_RED, C_RED);
+        tft.setTextColor(C_WHITE, C_RED);
+        tft.setTextDatum(MC_DATUM);
+        tft.drawString("Insert SD card!", SCR_W/2, 247, 2);
+        tft.setTextDatum(TL_DATUM);
+    }
+}
+
+void scrRec() {
+    tft.fillScreen(C_BG);
+    topBar("Recording", C_RED);
+    
+    tft.fillCircle(SCR_W - 25, 19, 8, C_RED);
+    tft.fillCircle(SCR_W - 25, 19, 4, C_WHITE);
+    
+    tft.fillRect(0, SCR_H - 30, SCR_W, 30, C_CARD);
+    tft.setTextColor(C_YELLOW, C_CARD);
+    tft.setTextDatum(MC_DATUM);
+    tft.drawString("Hold A+B to Stop", SCR_W/2, SCR_H - 15, 2);
+    tft.setTextDatum(TL_DATUM);
+}
+
+void updateRec() {
+    uint32_t el = (millis() - capStart) / 1000;
+    int h = el / 3600;
+    int m = (el % 3600) / 60;
+    int s = el % 60;
+    
+    int32_t rem = (nextCap - millis()) / 1000;
+    if (rem < 0) rem = 0;
+    
+    float pct = 1.0f - (float)(nextCap - millis()) / interval;
+    
+    char buf[24];
+    
+    sprintf(buf, "%02d:%02d:%02d", h, m, s);
+    infoCard(48, "Elapsed", buf, C_CYAN, true);
+    
+    sprintf(buf, "%lu", imgNum);
+    infoCard(92, "Images Captured", buf, C_GREEN, true);
+    
+    sprintf(buf, "%ld sec", rem);
+    infoCard(136, "Next Capture", buf, C_YELLOW, false);
+    
+    progressBar(180, pct, C_CYAN);
+    
+    if (msgFile[0]) {
+        infoCard(195, "Last File", msgFile, C_GRAY, false);
+    }
+    
+    if (totalKB > 1024) {
+        sprintf(buf, "%.1f MB", (float)totalKB / 1024);
+    } else {
+        sprintf(buf, "%lu KB", totalKB);
+    }
+    infoCard(239, "Total Size", buf, C_GRAY, false);
+    
+    // Blink record indicator
+    static uint32_t lastBlink = 0;
+    static bool vis = true;
+    if (millis() - lastBlink > 500) {
+        vis = !vis;
+        lastBlink = millis();
+    }
+    tft.fillCircle(SCR_W - 25, 19, 8, vis ? C_RED : C_CARD);
+    if (vis) tft.fillCircle(SCR_W - 25, 19, 4, C_WHITE);
+}
+
+void scrDone() {
+    tft.fillScreen(C_BG);
+    topBar("Complete", C_GREEN);
+    botBar("", "Home", false);
+    
+    int cx = SCR_W / 2;
+    tft.fillCircle(cx, 85, 30, C_GREEN);
+    tft.setTextColor(C_BG, C_GREEN);
+    tft.setTextDatum(MC_DATUM);
+    tft.drawString("OK", cx, 85, 4);
+    tft.setTextDatum(TL_DATUM);
+    
+    char buf[24];
+    sprintf(buf, "%lu images", imgNum);
+    infoCard(130, "Captured", buf, C_CYAN, true);
+    
+    if (totalKB > 1024) {
+        sprintf(buf, "%. 1f MB", (float)totalKB / 1024);
+    } else {
+        sprintf(buf, "%lu KB", totalKB);
+    }
+    infoCard(174, "Total Size", buf, C_GRAY, false);
+}
+
+void scrErr() {
+    tft.fillScreen(C_BG);
+    topBar("Error", C_RED);
+    botBar("", "Retry", false);
+    
+    int cx = SCR_W / 2;
+    tft.fillCircle(cx, 85, 30, C_RED);
+    tft.setTextColor(C_WHITE, C_RED);
+    tft.setTextDatum(MC_DATUM);
+    tft.drawString("!", cx, 85, 4);
+    tft.setTextDatum(TL_DATUM);
+    
+    card(8, 130, SCR_W - 16, 60, C_CARD, C_RED);
+    tft.setTextColor(C_WHITE, C_CARD);
+    tft.drawString(msgErr, 16, 155, 2);
+}
+
+// ============================================================
+// SD & CAMERA FUNCTIONS
+// ============================================================
+bool sdInit() {
+    if (!SD.begin()) { strcpy(msgErr, "SD mount failed"); return false; }
+    if (SD.cardType() == CARD_NONE) { strcpy(msgErr, "No SD card"); return false; }
+    return true;
+}
+
+uint32_t sdScan() {
+    uint32_t mx = 0;
+    File root = SD.open("/");
+    if (! root) return 0;
+    
+    while (true) {
+        File f = root.openNextFile();
+        if (!f) break;
+        const char* n = f.name();
+        int len = strlen(n);
+        if (len >= 12 && n[0] == 'i' && n[1] == 'm' && n[2] == 'g') {
+            if (n[len-4] == '.' && n[len-3] == 'j' && n[len-2] == 'p' && n[len-1] == 'g') {
+                char num[6] = {0};
+                for (int i = 0; i < 5; i++) num[i] = n[3 + i];
+                uint32_t v = atoi(num);
+                if (v > mx) mx = v;
+            }
+        }
+        f.close();
+    }
+    root.close();
+    return mx;
+}
+
+bool sdSave(uint8_t* buf, size_t len, uint32_t num) {
+    char path[24];
+    sprintf(path, "/img%05lu.jpg", num);
+    
+    File f = SD.open(path, FILE_WRITE);
+    if (!f) { strcpy(msgErr, "File create failed"); return false; }
+    
+    size_t w = f.write(buf, len);
+    f.close();
+    
+    if (w != len) { strcpy(msgErr, "Write failed"); return false; }
+    
+    for (int i = 0; i < 18; i++) msgFile[i] = path[i + 1];
+    msgFile[18] = 0;
+    totalKB += len / 1024;
+    return true;
+}
+
+bool camInit(framesize_t sz) {
+    camera_config_t c;
+    c. ledc_channel = LEDC_CHANNEL_0;
+    c.ledc_timer = LEDC_TIMER_0;
+    c.pin_d0 = CAM_Y2; c.pin_d1 = CAM_Y3; c.pin_d2 = CAM_Y4; c.pin_d3 = CAM_Y5;
+    c.pin_d4 = CAM_Y6; c. pin_d5 = CAM_Y7; c.pin_d6 = CAM_Y8; c.pin_d7 = CAM_Y9;
+    c.pin_xclk = CAM_XCLK; c.pin_pclk = CAM_PCLK;
+    c.pin_vsync = CAM_VSYNC; c.pin_href = CAM_HREF;
+    c. pin_sscb_sda = CAM_SIOD; c.pin_sscb_scl = CAM_SIOC;
+    c. pin_pwdn = CAM_PWDN; c.pin_reset = CAM_RESET;
+    c.xclk_freq_hz = 10000000;
+    c.pixel_format = PIXFORMAT_RGB565;
+    c.frame_size = sz;
+    c. grab_mode = CAMERA_GRAB_LATEST;
+    c.fb_count = 2;
+    
+    if (esp_camera_init(&c) != ESP_OK) {
+        strcpy(msgErr, "Camera init failed");
+        return false;
+    }
+    
+    sensor_t* s = esp_camera_sensor_get();
+    if (s) s->set_hmirror(s, 1);
+    
+    camOn = true;
+    return true;
+}
+
+bool camCapture() {
+    camera_fb_t* fb = esp_camera_fb_get();
+    if (!fb) { errCnt++; return false; }
+    
+    bool ok = fmt2jpg(fb->buf, fb->len, fb->width, fb->height, fb->format, JPG_QUALITY, &jpgBuf, &jpgSize);
+    esp_camera_fb_return(fb);
+    
+    if (!ok) { errCnt++; return false; }
+    errCnt = 0;
+    return true;
+}
+
+void camFreeJpg() {
+    if (jpgBuf) { free(jpgBuf); jpgBuf = NULL; jpgSize = 0; }
+}
+
+// ============================================================
+// STATE HANDLERS
+// ============================================================
+void hSplash() {
+    if (needDraw) { drawSplash(); needDraw = false; }
+    if (millis() - stTime > 2500 || pressA() || pressB()) {
+        goTo(S_MENU);
+    }
+}
+
+void hMenu() {
+    if (needDraw) { scrMenu(); needDraw = false; }
+    if (pressA()) { selMode = (selMode + 1) % 2; scrMenu(); }  // Only 2 options
+    if (pressB()) {
+        if (selMode == 0) goTo(S_STREAM);
+        else goTo(S_RES);
+    }
+}
+
+void hRes() {
+    if (checkExit()) { goHome(); return; }
+    if (needDraw) { scrRes(); needDraw = false; }
+    if (pressA()) { selRes = (selRes + 1) % NUM_RES; scrRes(); }
+    if (pressB()) { goTo(S_HRS); }
+}
+
+void hHrs() {
+    if (checkExit()) { goHome(); return; }
+    if (needDraw) { scrTime("Hours", "Hours", valH, 24); needDraw = false; }
+    if (pressA()) { valH = (valH + 1) % 25; scrTime("Hours", "Hours", valH, 24); }
+    if (pressB()) { goTo(S_MIN); }
+}
+
+void hMin() {
+    if (checkExit()) { goHome(); return; }
+    if (needDraw) { scrTime("Minutes", "Minutes", valM, 59); needDraw = false; }
+    if (pressA()) { valM = (valM + 1) % 60; scrTime("Minutes", "Minutes", valM, 59); }
+    if (pressB()) { goTo(S_SEC); }
+}
+
+void hSec() {
+    if (checkExit()) { goHome(); return; }
+    if (needDraw) { scrTime("Seconds", "Seconds", valS, 59); needDraw = false; }
+    if (pressA()) { valS = (valS + 1) % 60; scrTime("Seconds", "Seconds", valS, 59); }
+    if (pressB()) {
+        interval = 1000UL * (3600UL * valH + 60UL * valM + valS);
+        if (interval < 1000) { interval = 1000; valS = 1; valM = 0; valH = 0; }
+        sdOn = sdInit();
+        if (sdOn) imgBase = sdScan();
+        goTo(S_CONFIRM);
+    }
+}
+
+void hConfirm() {
+    if (checkExit()) { goHome(); return; }
+    if (needDraw) { scrConfirm(); needDraw = false; }
+    if (pressA()) { goTo(S_MENU); }
+    if (pressB()) {
+        if (! sdOn) {
+            sdOn = sdInit();
+            if (sdOn) imgBase = sdScan();
+            scrConfirm();
+            if (! sdOn) { strcpy(msgErr, "SD not ready"); goTo(S_ERR); }
+        } else {
+            if (camInit(RES[selRes].size)) {
+                imgNum = 0; totalKB = 0; errCnt = 0; msgFile[0] = 0;
+                capStart = millis(); nextCap = capStart;
+                goTo(S_REC);
+            } else { goTo(S_ERR); }
+        }
+    }
+}
+
+void hStream() {
+    if (checkExit()) { stopStream(); goHome(); return; }
+    if (needDraw) { streaming = true; k10. initBgCamerImage(); k10.setBgCamerImage(); needDraw = false; }
+    flagA = false; flagB = false;
+}
+
+void hRec() {
+    if (checkExit()) { stopCam(); goTo(S_DONE); return; }
+    if (needDraw) { scrRec(); updateRec(); needDraw = false; }
+    
+    uint32_t now = millis();
+    if (now >= nextCap) {
+        if (camCapture()) {
+            uint32_t n = imgBase + imgNum + 1;
+            if (sdSave(jpgBuf, jpgSize, n)) imgNum++;
+            else errCnt++;
+            camFreeJpg();
+        }
+        nextCap += interval;
+        if (nextCap < now) nextCap = now + interval;
+        if (errCnt >= 5) { strcpy(msgErr, "Too many errors"); stopCam(); goTo(S_ERR); return; }
+    }
+    if (now - lastDraw >= UI_REFRESH_MS) { updateRec(); lastDraw = now; }
+    flagA = false; flagB = false;
+}
+
+void hDone() {
+    if (needDraw) { scrDone(); needDraw = false; }
+    if (pressB()) { goTo(S_MENU); }
+}
+
+void hErr() {
+    if (needDraw) { scrErr(); needDraw = false; }
+    if (pressB()) { msgErr[0] = 0; errCnt = 0; goTo(S_MENU); }
+}
+
+// ============================================================
+// MAIN
+// ============================================================
+void run() {
+    switch (st) {
+        case S_SPLASH:   hSplash(); break;
+        case S_MENU:    hMenu(); break;
+        case S_RES:      hRes(); break;
+        case S_HRS:     hHrs(); break;
+        case S_MIN:     hMin(); break;
+        case S_SEC:     hSec(); break;
+        case S_CONFIRM:  hConfirm(); break;
+        case S_STREAM:  hStream(); break;
+        case S_REC:     hRec(); break;
+        case S_DONE:    hDone(); break;
+        case S_ERR:     hErr(); break;
+    }
+}
+
+void setup() {
+    Serial.begin(115200);
+    Serial.println("\n=============================");
+    Serial.println("  K10 Time-Lapse Camera");
+    Serial.printf("  %s by %s\n", APP_VERSION, APP_AUTHOR);
+    Serial.println("=============================\n");
+    
+    k10.begin();
+    k10.initScreen(2);
+    tft.init();
+    tft.setRotation(2);
+    tft.setTextSize(1);
+    tft.fillScreen(C_BG);
+    
+    k10.buttonA->setPressedCallback(onA);
+    k10.buttonB->setPressedCallback(onB);
+    clearBtn();
+    
+    Serial.println("Ready!\n");
+}
+
+void loop() {
+    run();
+    delay(10);
+}
